@@ -1,0 +1,273 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure(2) do |config|
+  # ----- my variables -----	
+  myvm_name = "vpn-client"
+  vpn_server_ip="192.168.90.146"	# refer to vpn server settings (left@/etc/ipsec.conf)
+  vpn_ipsec_psk="dd955d5ac64cee1e9ca56a8036ee70150f835aefebea5654dbd39070cad8"	# refer to vpn server settings (/etc/ipsec.secrets)
+  l2tpd_ppp_user="andrew"			# refer to vpn server settings (/etc/ppp/chap-secrets)
+  l2tpd_ppp_passwd="G1y"			# refer to vpn server settings (/etc/ppp/chap-secrets)
+  ipsec_conn_name="L2TP-PSK"
+  vpn_lac_name="vpn-connection"
+  
+  # ----- Global -----	
+  config.vm.box_check_update = false
+  #config.vm.usable_port_range =  (2200..2250)
+
+  # ----- VM1 -----
+  config.vm.define "#{myvm_name}" do |config|
+	config.vm.box = "trusty32"
+	config.vm.box_url = "https://cloud-images.ubuntu.com/vagrant/trusty/current/trusty-server-cloudimg-i386-vagrant-disk1.box"
+	config.vm.hostname = "#{myvm_name}"
+	config.vm.host_name = "#{myvm_name}"
+
+	config.vm.network :forwarded_port, guest: 22, host: 2222, id: "ssh", disabled: "true"
+	config.vm.network :forwarded_port, guest: 22, host: 2203, auto_correct: true
+	#config.vm.network "public_network", bridge: "Realtek PCIe GBE Family Controller", adapter: "1", ip: "192.168.90.222"
+	config.vm.network "public_network",
+						use_dhcp_assigned_default_route: true,
+						bridge: "Realtek PCIe GBE Family Controller",
+						#bridge: "Intel(R) Dual Band Wireless-AC 8260",
+						#:dev => "eth1",
+						#adapter: "1",
+						:mode => 'bridge',
+						auto_config: true
+
+	config.vm.synced_folder "C:/home/ws/VMs/#{myvm_name}", "/vagrant"
+
+	config.ssh.username = "vagrant"
+	config.ssh.password = "vagrant"
+	#config.ssh.insert_key = true
+	config.ssh.insert_key = false
+
+	config.vm.provider "virtualbox" do |vb|
+		vb.memory = 768
+		vb.cpus = 1
+		vb.name = "vbox-#{myvm_name}"
+		vb.customize ["modifyvm", :id, "--usb", "on"]
+		vb.customize ["modifyvm", :id, "--usbehci", "on"]
+		vb.customize ["modifyvm", :id, "--usbxhci", "on"]
+		vb.customize ["usbfilter",
+					  "add", "0",
+					  "--target", :id,
+					  "--active", "yes",
+					  "--name", "Prolific Technology Inc. USB-Serial Controller",
+					  "--vendorid", "067b",
+					  "--productid", "2303",
+					  "--revision", "0300",
+					  "--manufacturer", "Prolific Technology Inc.",
+					  "--product", "USB-Serial Controller",
+					  "--remote", "no"]
+	end
+
+	# ----- VM1:provision:INIT_CONFIG -----
+	config.vm.provision "shell", 
+	run: "never", 
+	inline: <<-INIT_CONFIG
+		echo "*** initial config ***"
+		export LANGUAGE=en_US.UTF-8
+		export LANG=en_US.UTF-8
+		export LC_ALL=en_US.UTF-8
+		locale-gen en_US.UTF-8
+		dpkg-reconfigure locales
+	INIT_CONFIG
+
+	# ----- VM1:provision:PKG_INSTALL -----
+	#   you can also use: run: "never|always",
+	config.vm.provision "shell", 
+	#run: "never",
+	inline: <<-PKG_INSTALL
+		echo "*** update apt-repository ***"
+		apt-get update -qq
+
+		echo "*** installing useful pkgs ***"
+		DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends lftp tree vim unzip git
+		#DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends git-review subversion ctags tmux dos2unix samba
+
+		#echo "*** installing pkgs for OpenWRT build system ***"
+		#DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+		#					 build-essential libncurses5-dev zlib1g-dev git-core \
+		#					 gawk flex quilt xsltproc mercurial unzip
+		#DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+		#					 texlive-base texlive-fonts-recommended texlive-fonts-extra \
+		#					 texlive-latex-base texlive-latex-extra tex4ht
+
+		#echo "*** installing repo ***"
+		#if [ ! -f /usr/local/bin/repo ]; then
+		#	curl -s https://storage.googleapis.com/git-repo-downloads/repo > /usr/local/bin/repo
+		#	chmod a+x /usr/local/bin/repo
+		#fi
+
+	PKG_INSTALL
+
+	# ----- VM1:provision:ENV_CONFIG -----
+	config.vm.provision "shell", 
+	#run: "never",
+	inline: <<-ENV_CONFIG
+		echo "*** config timezone ***"
+		sudo timedatectl set-ntp true
+		sudo timedatectl set-timezone 'Asia/Taipei'
+
+		echo "*** linking /bin/sh to bash instead of dash ***"
+		echo "dash dash/sh boolean false" | debconf-set-selections
+		DEBIAN_FRONTEND=noninteractive dpkg-reconfigure dash
+	ENV_CONFIG
+
+	# ----- VM1:provision:TEST_CONFIG -----
+	config.vm.provision "shell", 
+	run: "never",
+	inline: <<-TEST_CONFIG
+		echo "*** only for test ***"
+	TEST_CONFIG
+
+	# ----- VM1:provision:NET_CONFIG -----
+	config.vm.provision "shell", 
+	#run: "always", 
+	run: "never",
+	inline: <<-NET_CONFIG
+		echo "*** customize network config ***"
+		#route del default gw 10.0.2.2
+		#route add default gw 10.5.161.254
+	NET_CONFIG
+
+	# ----- VM1:provision:CONFIG_VPN -----
+	config.vm.provision "shell", 
+	#run: "never",
+	inline: <<-CONFIG_VPN
+		echo "*** setup VPN client ***"
+		DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openswan xl2tpd ppp
+		
+		config_file="/etc/ipsec.conf"
+		if [ -f $config_file ] && [ ! -f ${config_file}.BAK ]; then
+			cp $config_file ${config_file}.BAK
+		fi
+		cat <<EOF >$config_file
+# /etc/ipsec.conf - Openswan IPsec configuration file
+
+version	2.0
+
+config setup
+	dumpdir=/var/run/pluto/
+	nat_traversal=yes
+	virtual_private=%v4:10.0.0.0/8,%v4:192.168.0.0/16,%v4:172.16.0.0/12,%v4:25.0.0.0/8,%v6:fd00::/8,%v6:fe80::/10
+	oe=off
+	protostack=netkey
+	#plutoopts="--interface eth1"
+	#plutostderrlog=/var/log/ipsec.log
+	#force_keepalive=yes
+	#keep_alive=60
+
+conn %default
+	auto=add
+	authby=secret
+	pfs=no
+	keyingtries=3
+	ikelifetime=8h
+	keylife=1h
+	dpddelay=10
+	dpdtimeout=20
+	dpdaction=clear
+
+conn #{ipsec_conn_name}
+	#type=tunnel
+	type=transport
+	ike=aes256-sha1,aes128-sha1,3des-sha1
+	phase2alg=aes256-sha1,aes128-sha1,3des-sha1
+	#left=192.168.90.123
+	left=%defaultroute
+	leftprotoport=17/1701
+	right=#{vpn_server_ip}
+	#rightprotoport=17/%any
+	rightprotoport=17/1701
+EOF
+
+		config_file="/etc/ipsec.secrets"
+		if [ -f $config_file ] && [ ! -f ${config_file}.BAK ]; then
+			cp $config_file ${config_file}.BAK
+		fi
+		cat <<EOF >$config_file
+#%any #{vpn_server_ip}: PSK "#{vpn_ipsec_psk}"
+%any %any: PSK "#{vpn_ipsec_psk}"
+EOF
+
+		config_file="/etc/xl2tpd/xl2tpd.conf"
+		if [ -f $config_file ] && [ ! -f ${config_file}.BAK ]; then
+			cp $config_file ${config_file}.BAK
+		fi
+		cat <<EOF >$config_file
+[global]
+ipsec saref = no
+; saref refinfo = 30
+; debug avp = yes
+; debug network = yes
+; debug state = yes
+; debug tunnel = yes
+
+[lac #{vpn_lac_name}]
+lns = #{vpn_server_ip}
+refuse chap = yes
+refuse pap = yes
+require authentication = yes
+name = vpn-server
+; ppp debug = yes
+pppoptfile = /etc/ppp/options.l2tpd.client
+length bit = yes
+
+EOF
+
+		config_file="/etc/ppp/options.l2tpd.client"
+		if [ -f $config_file ] && [ ! -f ${config_file}.BAK ]; then
+			cp $config_file ${config_file}.BAK
+		fi
+		cat <<EOF >$config_file
+ipcp-accept-local
+ipcp-accept-remote
+refuse-eap
+require-mschap-v2
+noccp
+noauth
+idle 1800
+mtu 1410
+mru 1410
+defaultroute
+usepeerdns
+debug
+lock
+connect-delay 5000
+name #{l2tpd_ppp_user}
+password #{l2tpd_ppp_passwd}
+EOF
+	CONFIG_VPN
+
+	# ----- VM1:provision:CONFIG_VPN_START -----
+	config.vm.provision "shell", 
+	run: "always",
+	inline: <<-CONFIG_VPN_START
+	/etc/init.d/ipsec restart
+	/etc/init.d/xl2tpd restart
+	sleep 3
+	echo "c #{vpn_lac_name}" > /var/run/xl2tpd/l2tp-control
+	sleep 3
+	ipsec auto --add #{ipsec_conn_name}
+	ipsec auto --up #{ipsec_conn_name}
+	CONFIG_VPN_START
+	
+	# ----- VM1:provision:CONFIG_DONE -----
+	config.vm.provision "shell", 
+	run: "always", 
+	inline: <<-CONFIG_DONE
+		echo ""
+		echo "*** eth1 ip address: $(ifconfig eth1 | awk '/inet addr/{print substr($2,6)}') ***"
+		echo "*** ppp0 ip address: $(ifconfig ppp0 | awk '/inet addr/{print substr($2,6)}') ***"
+		echo "*** try to ping ppp0 gateway ip on VPN client and do tcpdump for route interface on VPN server $(ifconfig ppp0 | awk '/P-t-P/{print substr($3,7)}') ***"
+		echo ""
+		ping -c 5 $(ifconfig ppp0 | awk '/P-t-P/{print substr($3,7)}')
+	CONFIG_DONE
+
+	config.vm.post_up_message = <<-MESSAGE
+*** config.vm.was started :-) ***
+	MESSAGE
+  end
+  # ----- END VM1 -----
+end
